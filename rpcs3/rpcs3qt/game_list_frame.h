@@ -2,7 +2,6 @@
 
 #include "game_list.h"
 #include "custom_dock_widget.h"
-#include "gui_save.h"
 #include "shortcut_utils.h"
 #include "Utilities/lockless.h"
 #include "Utilities/mutex.h"
@@ -60,7 +59,7 @@ public:
 
 	const std::vector<game_info>& GetGameInfo() const;
 
-	void CreateShortcuts(const game_info& gameinfo, const std::set<gui::utils::shortcut_location>& locations);
+	void CreateShortcuts(const std::vector<game_info>& games, const std::set<gui::utils::shortcut_location>& locations);
 
 	bool IsEntryVisible(const game_info& game, bool search_fallback = false) const;
 
@@ -74,6 +73,7 @@ public Q_SLOTS:
 	void SetListMode(const bool& is_list);
 	void SetSearchText(const QString& text);
 	void SetShowCompatibilityInGrid(bool show);
+	void SetPreferGameDataIcons(bool enabled);
 	void SetShowCustomIcons(bool show);
 	void SetPlayHoverGifs(bool play);
 	void FocusAndSelectFirstEntryIfNoneIs();
@@ -141,6 +141,7 @@ private:
 	static u32 RemoveContentPathList(const std::vector<std::string>& path_list, const std::string& desc);
 	static bool RemoveContentBySerial(const std::string& base_dir, const std::string& serial, const std::string& desc);
 	static std::vector<std::string> GetDirListBySerial(const std::string& base_dir, const std::string& serial);
+	void BatchActionBySerials(progress_dialog* pdlg, const std::set<std::string>& serials, QString progressLabel, std::function<bool(const std::string&)> action, std::function<void(u32, u32)> cancel_log, bool refresh_on_finish, bool can_be_concurrent = false, std::function<bool()> should_wait_cb = {});
 	static std::string GetCacheDirBySerial(const std::string& serial);
 	static std::string GetDataDirBySerial(const std::string& serial);
 	std::string CurrentSelectionPath();
@@ -212,6 +213,7 @@ private:
 	qreal m_margin_factor;
 	qreal m_text_factor;
 	bool m_draw_compat_status_to_grid = false;
+	bool m_prefer_game_data_icons = false;
 	bool m_show_custom_icons = true;
 	bool m_play_hover_movies = true;
 	std::optional<auto_typemap<game_list_frame>> m_refresh_funcs_manage_type{std::in_place};

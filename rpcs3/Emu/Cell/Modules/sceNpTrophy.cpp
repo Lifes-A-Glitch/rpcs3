@@ -4,6 +4,7 @@
 #include "Emu/VFS.h"
 #include "Emu/IdManager.h"
 #include "Emu/Cell/PPUModule.h"
+#include "Emu/Cell/timers.hpp"
 #include "Emu/Cell/Modules/cellMsgDialog.h"
 
 #include "Utilities/rXml.h"
@@ -123,7 +124,7 @@ struct sce_np_trophy_manager
 			return res;
 		}
 
-		ctxt = idm::check<trophy_context_t>(context);
+		ctxt = idm::check_unlocked<trophy_context_t>(context);
 
 		if (!ctxt)
 		{
@@ -144,7 +145,7 @@ struct sce_np_trophy_manager
 			return res;
 		}
 
-		const auto hndl = idm::check<trophy_handle_t>(handle);
+		const auto hndl = idm::check_unlocked<trophy_handle_t>(handle);
 
 		if (!hndl)
 		{
@@ -409,7 +410,7 @@ error_code sceNpTrophyAbortHandle(u32 handle)
 		return SCE_NP_TROPHY_ERROR_INVALID_ARGUMENT;
 	}
 
-	const auto hndl = idm::check<trophy_handle_t>(handle);
+	const auto hndl = idm::check_unlocked<trophy_handle_t>(handle);
 
 	if (!hndl)
 	{
@@ -504,9 +505,16 @@ error_code sceNpTrophyCreateContext(vm::ptr<u32> context, vm::cptr<SceNpCommunic
 	}
 
 	// set trophy context parameters (could be passed to constructor through make_ptr call)
-	ctxt->trp_name = std::move(name);
+	ctxt->trp_name = name;
 	ctxt->read_only = !!(options & SCE_NP_TROPHY_OPTIONS_CREATE_CONTEXT_READ_ONLY);
 	*context = idm::last_id();
+
+	// set current trophy name for trophy list overlay
+	{
+		current_trophy_name& current_id = g_fxo->get<current_trophy_name>();
+		std::lock_guard lock(current_id.mtx);
+		current_id.name = std::move(name);
+	}
 
 	return CELL_OK;
 }
@@ -538,6 +546,11 @@ error_code sceNpTrophyDestroyContext(u32 context)
 	return CELL_OK;
 }
 
+struct register_context_thread_name
+{
+	static constexpr std::string_view thread_name = "Trophy Register Thread";
+};
+
 error_code sceNpTrophyRegisterContext(ppu_thread& ppu, u32 context, u32 handle, vm::ptr<SceNpTrophyStatusCallback> statusCb, vm::ptr<void> arg, u64 options)
 {
 	sceNpTrophy.warning("sceNpTrophyRegisterContext(context=0x%x, handle=0x%x, statusCb=*0x%x, arg=*0x%x, options=0x%llx)", context, handle, statusCb, arg, options);
@@ -552,7 +565,7 @@ error_code sceNpTrophyRegisterContext(ppu_thread& ppu, u32 context, u32 handle, 
 	}
 
 	const auto [ctxt, error] = trophy_manager.get_context_ex(context, handle, true);
-	const auto handle_ptr = idm::get<trophy_handle_t>(handle);
+	const auto handle_ptr = idm::get_unlocked<trophy_handle_t>(handle);
 
 	if (error)
 	{
@@ -641,7 +654,7 @@ error_code sceNpTrophyRegisterContext(ppu_thread& ppu, u32 context, u32 handle, 
 		return SCE_NP_TROPHY_ERROR_UNKNOWN_CONTEXT;
 	}
 
-	if (handle_ptr.get() != idm::check<trophy_handle_t>(handle))
+	if (handle_ptr.get() != idm::check_unlocked<trophy_handle_t>(handle))
 	{
 		on_error();
 		return SCE_NP_TROPHY_ERROR_UNKNOWN_HANDLE;
@@ -701,56 +714,76 @@ error_code sceNpTrophyRegisterContext(ppu_thread& ppu, u32 context, u32 handle, 
 
 	ensure(tropusr->Load(trophyUsrPath, trophyConfPath).success);
 
-	// This emulates vsh sending the events and ensures that not 2 events are processed at once
-	const std::pair<u32, s32> statuses[] =
-	{
-		{ SCE_NP_TROPHY_STATUS_PROCESSING_SETUP, 3 },
-		{ SCE_NP_TROPHY_STATUS_PROCESSING_PROGRESS, ::narrow<s32>(tropusr->GetTrophiesCount()) - 1 },
-		{ SCE_NP_TROPHY_STATUS_PROCESSING_FINALIZE, 4 },
-		{ SCE_NP_TROPHY_STATUS_PROCESSING_COMPLETE, 0 }
-	};
-
 	lock2.unlock();
 
 	lv2_obj::sleep(ppu);
-
-	// Create a counter which is destroyed after the function ends
-	const auto queued = std::make_shared<atomic_t<u32>>(0);
-	std::weak_ptr<atomic_t<u32>> wkptr = queued;
-
-	for (auto status : statuses)
 	{
-		// One status max per cellSysutilCheckCallback call
-		*queued += status.second;
-		for (s32 completed = 0; completed <= status.second; completed++)
+		const s32 progress_cb_count = ::narrow<s32>(tropusr->GetTrophiesCount()) - 1;
 		{
-			sysutil_register_cb([statusCb, status, context, completed, arg, wkptr](ppu_thread& cb_ppu) -> s32
+			// This emulates vsh sending the events and ensures that not 2 events are processed at once
+			const std::pair<SceNpTrophyStatus, s32> statuses[] =
 			{
-				// TODO: it is possible that we need to check the return value here as well.
-				statusCb(cb_ppu, context, status.first, completed, status.second, arg);
+				{ SCE_NP_TROPHY_STATUS_PROCESSING_SETUP, 3 },
+				{ SCE_NP_TROPHY_STATUS_PROCESSING_PROGRESS, progress_cb_count },
+				{ SCE_NP_TROPHY_STATUS_PROCESSING_FINALIZE, std::max<s32>(progress_cb_count, 9) - 5 }, // Seems varying, little bit less than progress_cb_count
+				{ SCE_NP_TROPHY_STATUS_PROCESSING_COMPLETE, 0 }
+			};
 
-				const auto queued = wkptr.lock();
-				if (queued && (*queued)-- == 1)
+			// Create a counter which is destroyed after the function ends
+			const auto queued = std::make_shared<atomic_t<u32>>(0);
+
+			u32 total_events = 0;
+
+			for (auto status : statuses)
+			{
+				total_events += status.second + 1;
+			}
+
+			for (auto status : statuses)
+			{
+				for (s32 completed = 0; completed <= status.second; completed++)
 				{
-					queued->notify_one();
+					// One status max per cellSysutilCheckCallback call
+					*queued += 1;
+
+					sysutil_register_cb([statusCb, status, context, completed, arg, queued](ppu_thread& cb_ppu) -> s32
+					{
+						// TODO: it is possible that we need to check the return value here as well.
+						statusCb(cb_ppu, context, status.first, completed, status.second, arg);
+
+						if (queued && (*queued)-- == 1)
+						{
+							queued->notify_one();
+						}
+
+						return 0;
+					});
+
+					u64 current = get_system_time();
+
+					// Minimum register trophy time 2 seconds globally.
+					const u64 until_min = current + (2'000'000 / total_events);
+					const u64 until_max = until_min + 50'000;
+
+					// If too much time passes just send the rest of the events anyway
+					for (u32 old_value = *queued; current < (old_value ? until_max : until_min);
+						current = get_system_time(), old_value = *queued)
+					{
+						if (!old_value)
+						{
+							thread_ctrl::wait_for(until_min - current);
+						}
+						else
+						{
+							thread_ctrl::wait_on(*queued, old_value, until_max - current);
+						}
+
+						if (thread_ctrl::state() == thread_state::aborting)
+						{
+							return {};
+						}
+					}
 				}
-
-				return 0;
-			});
-		}
-
-		u64 current = get_system_time();
-		const u64 until = current + 300'000;
-
-		// If too much time passes just send the rest of the events anyway
-		for (u32 old_value; current < until && (old_value = *queued);
-			current = get_system_time())
-		{
-			thread_ctrl::wait_on(*queued, old_value, until - current);
-
-			if (ppu.is_stopped())
-			{
-				return {};
 			}
 		}
 	}
@@ -1376,9 +1409,11 @@ error_code sceNpTrophyGetGameIcon(u32 context, u32 handle, vm::ptr<void> buffer,
 		return SCE_NP_TROPHY_ERROR_INVALID_ARGUMENT;
 	}
 
-	fs::file icon_file(vfs::get("/dev_hdd0/home/" + Emu.GetUsr() + "/trophy/" + ctxt->trp_name + "/ICON0.PNG"));
+	// Try to get icon in current language first
+	const std::string trophy_path = fmt::format("/dev_hdd0/home/%s/trophy/%s/", Emu.GetUsr(), ctxt->trp_name);
+	fs::file icon_file(vfs::get(fmt::format("%s/ICON0_%02d.PNG", trophy_path, static_cast<s32>(g_cfg.sys.language))));
 
-	if (!icon_file)
+	if (!icon_file && !icon_file.open(vfs::get(fmt::format("%s/ICON0.PNG", trophy_path))))
 	{
 		return SCE_NP_TROPHY_ERROR_UNKNOWN_FILE;
 	}

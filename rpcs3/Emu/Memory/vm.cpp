@@ -4,10 +4,8 @@
 #include "vm_ref.h"
 #include "vm_reservation.h"
 
-#include "Utilities/mutex.h"
 #include "Utilities/Thread.h"
 #include "Utilities/address_range.h"
-#include "Utilities/JIT.h"
 #include "Emu/CPU/CPUThread.h"
 #include "Emu/RSX/RSXThread.h"
 #include "Emu/Cell/SPURecompiler.h"
@@ -19,6 +17,8 @@
 #include "util/asm.hpp"
 #include "util/simd.hpp"
 #include "util/serialization.hpp"
+
+#include <thread>
 
 LOG_CHANNEL(vm_log, "VM");
 
@@ -47,7 +47,7 @@ namespace vm
 	u8* const g_sudo_addr = g_base_addr + 0x1'0000'0000;
 
 	// Auxiliary virtual memory for executable areas
-	u8* const g_exec_addr = memory_reserve_4GiB(g_sudo_addr, 0x200000000);
+	u8* const g_exec_addr = memory_reserve_4GiB(g_sudo_addr, 0x300000000);
 
 	// Hooks for memory R/W interception (default: zero offset to some function with only ret instructions)
 	u8* const g_hook_addr = memory_reserve_4GiB(g_exec_addr, 0x800000000);
@@ -342,7 +342,7 @@ namespace vm
 		utils::prefetch_read(g_range_lock_set + 2);
 		utils::prefetch_read(g_range_lock_set + 4);
 
-		const auto range = utils::address_range::start_length(addr, size);
+		const auto range = utils::address_range32::start_length(addr, size);
 
 		u64 to_clear = get_range_lock_bits(false).load();
 
@@ -350,7 +350,7 @@ namespace vm
 		{
 			to_clear = for_all_range_locks(to_clear, [&](u32 addr2, u32 size2)
 			{
-				if (range.overlaps(utils::address_range::start_length(addr2, size2))) [[unlikely]]
+				if (range.overlaps(utils::address_range32::start_length(addr2, size2))) [[unlikely]]
 				{
 					return 1;
 				}
@@ -386,6 +386,9 @@ namespace vm
 
 			ok = false;
 		}
+
+		// Do some CPU work
+		cpu.cpu_wait(+cpu_flag::exit);
 
 		if (!ok || cpu.state & cpu_flag::memory)
 		{
@@ -480,8 +483,6 @@ namespace vm
 			}
 		}
 
-		bool to_prepare_memory = true;
-
 		for (u64 i = 0;; i++)
 		{
 			auto& bits = get_range_lock_bits(true);
@@ -509,22 +510,11 @@ namespace vm
 
 			if (i < 100)
 			{
-				if (to_prepare_memory)
-				{
-					// We have some spare time, prepare cache lines (todo: reservation tests here)
-					utils::prefetch_write(vm::get_super_ptr(addr));
-					utils::prefetch_write(vm::get_super_ptr(addr) + 64);
-					to_prepare_memory = false;
-				}
-
 				busy_wait(200);
 			}
 			else
 			{
 				std::this_thread::yield();
-
-				// Thread may have been switched or the cache clue has been undermined, cache needs to be prapred again
-				to_prepare_memory = true;
 			}
 		}
 
@@ -588,13 +578,6 @@ namespace vm
 					break;
 				}
 
-				if (to_prepare_memory)
-				{
-					utils::prefetch_write(vm::get_super_ptr(addr));
-					utils::prefetch_write(vm::get_super_ptr(addr) + 64);
-					to_prepare_memory = false;
-				}
-
 				utils::pause();
 			}
 
@@ -604,13 +587,6 @@ namespace vm
 				{
 					while (!(ptr->state & cpu_flag::wait))
 					{
-						if (to_prepare_memory)
-						{
-							utils::prefetch_write(vm::get_super_ptr(addr));
-							utils::prefetch_write(vm::get_super_ptr(addr) + 64);
-							to_prepare_memory = false;
-						}
-
 						utils::pause();
 					}
 				}
@@ -743,7 +719,7 @@ namespace vm
 		}
 
 		// If native page size exceeds 4096, don't map native pages (expected to be always mapped in this case)
-		const bool is_noop = bflags & page_size_4k && utils::c_page_size > 4096;
+		const bool is_noop = bflags & page_size_4k && utils::get_page_size() > 4096;
 
 		// Lock range being mapped
 		auto range_lock = _lock_main_range_lock(range_allocation, addr, size);
@@ -955,7 +931,7 @@ namespace vm
 		}
 
 		// If native page size exceeds 4096, don't unmap native pages (always mapped)
-		const bool is_noop = bflags & page_size_4k && utils::c_page_size > 4096;
+		const bool is_noop = bflags & page_size_4k && utils::get_page_size() > 4096;
 
 		// Determine deallocation size
 		u32 size = 0;
@@ -1302,7 +1278,7 @@ namespace vm
 			// Special path for whole-allocated areas allowing 4k granularity
 			m_common = std::make_shared<utils::shm>(size, fmt::format("_block_x%08x", addr));
 
-			if (!map_critical(vm::_ptr<u8>(addr), this->flags & page_size_4k && utils::c_page_size > 4096 ? utils::protection::rw : utils::protection::no) || !map_critical(vm::get_super_ptr(addr), utils::protection::rw))
+			if (!map_critical(vm::_ptr<u8>(addr), this->flags & page_size_4k && utils::get_page_size() > 4096 ? utils::protection::rw : utils::protection::no) || !map_critical(vm::get_super_ptr(addr), utils::protection::rw))
 			{
 				fmt::throw_exception("Memory mapping failed (addr=0x%x, size=0x%x, flags=0x%x): %s", addr, size, flags, map_error);
 			}
@@ -1746,8 +1722,7 @@ namespace vm
 				if (is_memory_compatible_for_copy_from_executable_optimization(addr, shm.first))
 				{
 					// Revert changes
-					ar.data.resize(ar.data.size() - (sizeof(u32) * 2 + sizeof(memory_page)));
-					ar.seek_end();
+					ar.trunc(sizeof(u32) * 2 + sizeof(memory_page));
 					vm_log.success("Removed memory block matching the memory of the executable from savestate. (addr=0x%x, size=0x%x)", addr, shm.first);
 					continue;
 				}
@@ -1776,7 +1751,7 @@ namespace vm
 		if (flags & preallocated)
 		{
 			m_common = std::make_shared<utils::shm>(size, fmt::format("_block_x%08x", addr));
-			m_common->map_critical(vm::base(addr), this->flags & page_size_4k && utils::c_page_size > 4096 ? utils::protection::rw : utils::protection::no);
+			m_common->map_critical(vm::base(addr), this->flags & page_size_4k && utils::get_page_size() > 4096 ? utils::protection::rw : utils::protection::no);
 			m_common->map_critical(vm::get_super_ptr(addr));
 		}
 
@@ -1841,7 +1816,7 @@ namespace vm
 
 	static bool _test_map(u32 addr, u32 size)
 	{
-		const auto range = utils::address_range::start_length(addr, size);
+		const auto range = utils::address_range32::start_length(addr, size);
 
 		if (!range.valid())
 		{
@@ -1855,7 +1830,7 @@ namespace vm
 				continue;
 			}
 
-			if (range.overlaps(utils::address_range::start_length(block->addr, block->size)))
+			if (range.overlaps(utils::address_range32::start_length(block->addr, block->size)))
 			{
 				return false;
 			}

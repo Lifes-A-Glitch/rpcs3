@@ -4,6 +4,8 @@
 #include <util/vm.hpp>
 #include <Emu/Memory/vm.h>
 
+#include "Utilities/mutex.h"
+
 #include "rsx_utils.h"
 
 #include <vector>
@@ -16,9 +18,8 @@ namespace rsx
 
 	static inline std::string_view location_tostring(u32 location)
 	{
-		ensure(location < 2);
 		constexpr const char* location_names[2] = { "CELL_GCM_LOCATION_LOCAL", "CELL_GCM_LOCATION_MAIN" };
-		return location_names[location];
+		return ::at32(location_names, location);
 	}
 
 	static inline u32 classify_location(u32 address)

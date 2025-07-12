@@ -10,6 +10,8 @@
 #include "util/logs.hpp"
 #include "util/to_endian.hpp"
 
+#include "Utilities/mutex.h"
+
 #include "Loader/ELF.h"
 
 #include <span>
@@ -453,7 +455,7 @@ struct spu_int_ctrl_t
 	atomic_t<u64> mask;
 	atomic_t<u64> stat;
 
-	std::shared_ptr<struct lv2_int_tag> tag;
+	shared_ptr<struct lv2_int_tag> tag;
 
 	void set(u64 ints);
 
@@ -636,6 +638,7 @@ public:
 	virtual ~spu_thread() override;
 	void cleanup();
 	void cpu_init();
+	void init_spu_decoder();
 
 	static const u32 id_base = 0x02000000; // TODO (used to determine thread type)
 	static const u32 id_step = 1;
@@ -755,8 +758,8 @@ public:
 	atomic_t<status_npc_sync_var> status_npc{};
 	std::array<spu_int_ctrl_t, 3> int_ctrl{}; // SPU Class 0, 1, 2 Interrupt Management
 
-	std::array<std::pair<u32, std::shared_ptr<lv2_event_queue>>, 32> spuq{}; // Event Queue Keys for SPU Thread
-	std::shared_ptr<lv2_event_queue> spup[64]; // SPU Ports
+	std::array<std::pair<u32, shared_ptr<lv2_event_queue>>, 32> spuq{}; // Event Queue Keys for SPU Thread
+	shared_ptr<lv2_event_queue> spup[64]; // SPU Ports
 	spu_channel exit_status{}; // Threaded SPU exit status (not a channel, but the interface fits)
 	atomic_t<u32> last_exit_status; // Value to be written in exit_status after checking group termination
 	lv2_spu_group* const group; // SPU Thread Group (access by the spu threads in the group only! From other threads obtain a shared pointer to group using group ID)
@@ -799,9 +802,18 @@ public:
 	u32 last_getllar = umax; // LS address of last GETLLAR (if matches current GETLLAR we can let the thread rest)
 	u32 last_getllar_gpr1 = umax;
 	u32 last_getllar_addr = umax;
+	u32 last_getllar_lsa = umax;
 	u32 getllar_spin_count = 0;
 	u32 getllar_busy_waiting_switch = umax; // umax means the test needs evaluation, otherwise it's a boolean
 	u64 getllar_evaluate_time = 0;
+
+	u32 eventstat_raddr = 0;
+	u32 eventstat_getllar = 0;
+	u64 eventstat_block_counter = 0;
+	u64 eventstat_spu_group_restart = 0;
+	u64 eventstat_spin_count = 0;
+	u64 eventstat_evaluate_time = 0;
+	u32 eventstat_busy_waiting_switch = 0;
 
 	std::vector<mfc_cmd_dump> mfc_history;
 	u64 mfc_dump_idx = 0;
@@ -826,6 +838,7 @@ public:
 	bool stop_flag_removal_protection = false;
 
 	std::array<std::array<u8, 4>, SPU_LS_SIZE / 128> getllar_wait_time{};
+	std::array<std::array<u8, 16>, SPU_LS_SIZE / 128> eventstat_wait_time{};
  
 	void push_snr(u32 number, u32 value);
 	static void do_dma_transfer(spu_thread* _this, const spu_mfc_cmd& args, u8* ls);
@@ -841,7 +854,7 @@ public:
 	void set_events(u32 bits);
 	void set_interrupt_status(bool enable);
 	bool check_mfc_interrupts(u32 next_pc);
-	static bool is_exec_code(u32 addr, std::span<const u8> ls_ptr, u32 base_addr = 0, bool avoid_dead_code = false); // Only a hint, do not rely on it other than debugging purposes
+	static bool is_exec_code(u32 addr, std::span<const u8> ls_ptr, u32 base_addr = 0, bool avoid_dead_code = false, bool is_range_limited = false); // A hint, do not rely on it for true execution compatibility
 	static std::vector<u32> discover_functions(u32 base_addr, std::span<const u8> ls, bool is_known_addr, u32 /*entry*/);
 	u32 get_ch_count(u32 ch);
 	s64 get_ch_value(u32 ch);
@@ -888,6 +901,9 @@ public:
 	// Returns true if reservation existed but was just discovered to be lost
 	// It is safe to use on any address, even if not directly accessed by SPU (so it's slower)
 	bool reservation_check(u32 addr, const decltype(rdata)& data) const;
+	static bool reservation_check(u32 addr, u32 hash, atomic_t<u64, 64>* range_lock);
+	usz register_cache_line_waiter(u32 addr);
+	void deregister_cache_line_waiter(usz index);
 
 	bool read_reg(const u32 addr, u32& value);
 	bool write_reg(const u32 addr, const u32 value);
@@ -896,6 +912,8 @@ public:
 	static atomic_t<u32> g_raw_spu_ctr;
 	static atomic_t<u32> g_raw_spu_id[5];
 	static atomic_t<u32> g_spu_work_count;
+
+	static atomic_t<u64> g_spu_waiters_by_value[6];
 
 	static u32 find_raw_spu(u32 id)
 	{

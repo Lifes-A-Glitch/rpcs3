@@ -328,8 +328,8 @@ namespace rsx
 			{
 				const bool is_overlapping = !src_is_modified && dst.dma == src.dma && [&]() -> bool
 				{
-					const auto src_range = utils::address_range::start_length(src.rsx_address, src.pitch * (src.height - 1) + (src.bpp * src.width));
-					const auto dst_range = utils::address_range::start_length(dst.rsx_address, dst.pitch * (dst.clip_height - 1) + (dst.bpp * dst.clip_width));
+					const auto src_range = utils::address_range32::start_length(src.rsx_address, src.pitch * (src.height - 1) + (src.bpp * src.width));
+					const auto dst_range = utils::address_range32::start_length(dst.rsx_address, dst.pitch * (dst.clip_height - 1) + (dst.bpp * dst.clip_width));
 					return src_range.overlaps(dst_range);
 				}();
 
@@ -462,7 +462,7 @@ namespace rsx
 		}
 
 		void swizzled_copy_2(
-			u8* linear_pixels,
+			const u8* linear_pixels,
 			u8* swizzled_pixels,
 			u32 linear_pitch,
 			u16 out_w,
@@ -480,14 +480,14 @@ namespace rsx
 			sw_height_log2 = sw_height_log2 == 0 ? 1 : sw_height_log2;
 
 			// swizzle based on destination size
-			u16 sw_width = 1 << sw_width_log2;
-			u16 sw_height = 1 << sw_height_log2;
+			const u16 sw_width = 1 << sw_width_log2;
+			const u16 sw_height = 1 << sw_height_log2;
 			*/
 
 			std::vector<u8> sw_temp;
 
-			u32 sw_width = next_pow2(out_w);
-			u32 sw_height = next_pow2(out_h);
+			const u32 sw_width = next_pow2(out_w);
+			const u32 sw_height = next_pow2(out_h);
 
 			// Check and pad texture out if we are given non power of 2 output
 			if (sw_width != out_w || sw_height != out_h)
@@ -612,7 +612,7 @@ namespace rsx
 			const bool interpolate = in_inter == blit_engine::transfer_interpolator::foh;
 
 			auto real_dst = dst.pixels;
-			const auto tiled_region = RSX(ctx)->get_tiled_memory_region(utils::address_range::start_length(dst.rsx_address, dst.pitch * dst.clip_height));
+			const auto tiled_region = RSX(ctx)->get_tiled_memory_region(utils::address_range32::start_length(dst.rsx_address, dst.pitch * dst.clip_height));
 			std::vector<u8> tmp;
 
 			if (tiled_region)
@@ -641,7 +641,7 @@ namespace rsx
 				}
 
 				// Swizzle_copy_2 only pads the data and encodes it as a swizzled output. Transformation (scaling, rotation, etc) is done in swizzle_copy_1
-				swizzled_copy_2(const_cast<u8*>(pixels_src), dst.pixels, src_pitch, out_w, out_h, dst.bpp);
+				swizzled_copy_2(pixels_src, dst.pixels, src_pitch, out_w, out_h, dst.bpp);
 			}
 
 			if (tiled_region)

@@ -5,6 +5,8 @@
 #include "Emu/Memory/vm_ptr.h"
 #include "Emu/Cell/ErrorCodes.h"
 
+#include "util/shared_ptr.hpp"
+
 #include <vector>
 
 struct lv2_memory_container;
@@ -24,14 +26,14 @@ struct lv2_memory : lv2_obj
 	const u64 key; // IPC key
 	const bool pshared; // Process shared flag
 	lv2_memory_container* const ct; // Associated memory container
-	const std::shared_ptr<utils::shm> shm;
+	atomic_ptr<std::shared_ptr<utils::shm>> shm;
 
 	atomic_t<u32> counter{0};
 
 	lv2_memory(u32 size, u32 align, u64 flags, u64 key, bool pshared, lv2_memory_container* ct);
 
 	lv2_memory(utils::serial& ar);
-	static std::shared_ptr<void> load(utils::serial& ar);
+	static std::function<void(void*)> load(utils::serial& ar);
 	void save(utils::serial& ar);
 
 	CellError on_id_create();

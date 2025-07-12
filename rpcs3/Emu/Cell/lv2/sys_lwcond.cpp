@@ -64,7 +64,7 @@ error_code _sys_lwcond_destroy(ppu_thread& ppu, u32 lwcond_id)
 
 	sys_lwcond.trace("_sys_lwcond_destroy(lwcond_id=0x%x)", lwcond_id);
 
-	std::shared_ptr<lv2_lwcond> _cond;
+	shared_ptr<lv2_lwcond> _cond;
 
 	while (true)
 	{
@@ -440,7 +440,7 @@ error_code _sys_lwcond_queue_wait(ppu_thread& ppu, u32 lwcond_id, u32 lwmutex_id
 
 	ppu.gpr[3] = CELL_OK;
 
-	std::shared_ptr<lv2_lwmutex> mutex;
+	shared_ptr<lv2_lwmutex> mutex;
 
 	auto& sstate = *ppu.optional_savestate_state;
 
@@ -502,7 +502,7 @@ error_code _sys_lwcond_queue_wait(ppu_thread& ppu, u32 lwcond_id, u32 lwmutex_id
 
 	if (!cond || !mutex)
 	{
-		return CELL_ESRCH;
+		return { CELL_ESRCH, fmt::format("lwmutex_id: 0x%x, lwcond_id: 0x%x", lwmutex_id, lwcond_id) };
 	}
 
 	if (ppu.state & cpu_flag::again)

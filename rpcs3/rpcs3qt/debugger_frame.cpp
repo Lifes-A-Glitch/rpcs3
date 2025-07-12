@@ -10,6 +10,7 @@
 #include "call_stack_list.h"
 #include "input_dialog.h"
 #include "qt_utils.h"
+#include "hex_validator.h"
 
 #include "Emu/System.h"
 #include "Emu/IdManager.h"
@@ -31,54 +32,26 @@
 #include <QTimer>
 #include <QCheckBox>
 #include <QMessageBox>
+#include <QMenu>
+#include <QTextDocumentFragment>
 #include <algorithm>
 #include <functional>
 
+#include "rpcs3qt/debugger_add_bp_window.h"
 #include "util/asm.hpp"
-
-constexpr auto qstr = QString::fromStdString;
 
 constexpr auto s_pause_flags = cpu_flag::dbg_pause + cpu_flag::dbg_global_pause;
 
 extern atomic_t<bool> g_debugger_pause_all_threads_on_bp;
 
 extern const ppu_decoder<ppu_itype> g_ppu_itype;
+#ifdef RPCS3_HAS_MEMORY_BREAKPOINTS
+breakpoint_handler g_breakpoint_handler = breakpoint_handler();
+#endif
 
-extern bool is_using_interpreter(thread_class t_class)
-{
-	switch (t_class)
-	{
-	case thread_class::ppu: return g_cfg.core.ppu_decoder != ppu_decoder_type::llvm;
-	case thread_class::spu: return g_cfg.core.spu_decoder != spu_decoder_type::asmjit && g_cfg.core.spu_decoder != spu_decoder_type::llvm;
-	default: return true;
-	}
-}
+extern bool is_using_interpreter(thread_class t_class);
 
-extern std::shared_ptr<CPUDisAsm> make_disasm(const cpu_thread* cpu, std::shared_ptr<cpu_thread> handle)
-{
-	if (!handle)
-	{
-		switch (cpu->get_class())
-		{
-		case thread_class::ppu: handle = idm::get<named_thread<ppu_thread>>(cpu->id); break;
-		case thread_class::spu: handle = idm::get<named_thread<spu_thread>>(cpu->id); break;
-		default: break;
-		}
-	}
-
-	std::shared_ptr<CPUDisAsm> result;
-
-	switch (cpu->get_class())
-	{
-	case thread_class::ppu: result = std::make_shared<PPUDisAsm>(cpu_disasm_mode::interpreter, vm::g_sudo_addr); break;
-	case thread_class::spu: result = std::make_shared<SPUDisAsm>(cpu_disasm_mode::interpreter, static_cast<const spu_thread*>(cpu)->ls); break;
-	case thread_class::rsx: result = std::make_shared<RSXDisAsm>(cpu_disasm_mode::interpreter, vm::g_sudo_addr, 0, cpu); break;
-	default: return result;
-	}
-
-	result->set_cpu_handle(std::move(handle));
-	return result;
-}
+extern std::shared_ptr<CPUDisAsm> make_disasm(const cpu_thread* cpu, shared_ptr<cpu_thread> handle);
 
 debugger_frame::debugger_frame(std::shared_ptr<gui_settings> gui_settings, QWidget *parent)
 	: custom_dock_widget(tr("Debugger [Press F1 for Help]"), parent)
@@ -98,7 +71,12 @@ debugger_frame::debugger_frame(std::shared_ptr<gui_settings> gui_settings, QWidg
 	QHBoxLayout* hbox_b_main = new QHBoxLayout();
 	hbox_b_main->setContentsMargins(0, 0, 0, 0);
 
+#ifdef RPCS3_HAS_MEMORY_BREAKPOINTS
+	m_ppu_breakpoint_handler = &g_breakpoint_handler;
+#else
 	m_ppu_breakpoint_handler = new breakpoint_handler();
+#endif
+
 	m_breakpoint_list = new breakpoint_list(this, m_ppu_breakpoint_handler);
 
 	m_debugger_list = new debugger_list(this, m_gui_settings, m_ppu_breakpoint_handler);
@@ -122,6 +100,7 @@ debugger_frame::debugger_frame(std::shared_ptr<gui_settings> gui_settings, QWidg
 	m_go_to_pc = new QPushButton(tr("Go To PC"), this);
 	m_btn_step = new QPushButton(tr("Step"), this);
 	m_btn_step_over = new QPushButton(tr("Step Over"), this);
+	m_btn_add_bp = new QPushButton(tr("Add BP"), this);
 	m_btn_run = new QPushButton(RunString, this);
 
 	EnableButtons(false);
@@ -132,6 +111,7 @@ debugger_frame::debugger_frame(std::shared_ptr<gui_settings> gui_settings, QWidg
 	hbox_b_main->addWidget(m_go_to_pc);
 	hbox_b_main->addWidget(m_btn_step);
 	hbox_b_main->addWidget(m_btn_step_over);
+	hbox_b_main->addWidget(m_btn_add_bp);
 	hbox_b_main->addWidget(m_btn_run);
 	hbox_b_main->addWidget(m_choice_units);
 	hbox_b_main->addStretch();
@@ -145,7 +125,8 @@ debugger_frame::debugger_frame(std::shared_ptr<gui_settings> gui_settings, QWidg
 	m_regs = new QPlainTextEdit(this);
 	m_regs->setLineWrapMode(QPlainTextEdit::NoWrap);
 	m_regs->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
-
+	m_regs->setContextMenuPolicy(Qt::CustomContextMenu);
+	
 	m_debugger_list->setFont(m_mono);
 	m_misc_state->setFont(m_mono);
 	m_regs->setFont(m_mono);
@@ -178,11 +159,19 @@ debugger_frame::debugger_frame(std::shared_ptr<gui_settings> gui_settings, QWidg
 	body->setLayout(vbox_p_main);
 	setWidget(body);
 
+	connect(m_regs, &QPlainTextEdit::customContextMenuRequested, this, &debugger_frame::OnRegsContextMenu);
+
 	connect(m_go_to_addr, &QAbstractButton::clicked, this, &debugger_frame::ShowGotoAddressDialog);
 	connect(m_go_to_pc, &QAbstractButton::clicked, this, [this]() { ShowPC(true); });
 
 	connect(m_btn_step, &QAbstractButton::clicked, this, &debugger_frame::DoStep);
 	connect(m_btn_step_over, &QAbstractButton::clicked, [this]() { DoStep(true); });
+
+	connect(m_btn_add_bp, &QAbstractButton::clicked, this, [this]
+		{
+			debugger_add_bp_window dlg(m_breakpoint_list, this);
+			dlg.exec();
+		});
 
 	connect(m_btn_run, &QAbstractButton::clicked, this, &debugger_frame::RunBtnPress);
 
@@ -850,7 +839,7 @@ std::function<cpu_thread*()> debugger_frame::make_check_cpu(cpu_thread* cpu, boo
 
 	const auto type = cpu ? cpu->get_class() : thread_class::general;
 
-	std::shared_ptr<cpu_thread> shared;
+	shared_ptr<cpu_thread> shared;
 
 	if (g_fxo->is_init<id_manager::id_map<named_thread<ppu_thread>>>() && g_fxo->is_init<id_manager::id_map<named_thread<spu_thread>>>())
 	{
@@ -869,11 +858,11 @@ std::function<cpu_thread*()> debugger_frame::make_check_cpu(cpu_thread* cpu, boo
 		{
 			if (type == thread_class::ppu)
 			{
-				shared = idm::get<named_thread<ppu_thread>>(cpu->id);
+				shared = idm::get_unlocked<named_thread<ppu_thread>>(cpu->id);
 			}
 			else if (type == thread_class::spu)
 			{
-				shared = idm::get<named_thread<spu_thread>>(cpu->id);
+				shared = idm::get_unlocked<named_thread<spu_thread>>(cpu->id);
 			}
 		}
 	}
@@ -1039,7 +1028,7 @@ void debugger_frame::UpdateUnitList()
 		std::function<cpu_thread*()> func_cpu = make_check_cpu(std::addressof(cpu), true);
 
 		// Space at the end is to pad a gap on the right
-		cpu_list.emplace_back(qstr((id >> 24 == 0x55 ? "RSX[0x55555555]" : cpu.get_name()) + ' '), std::move(func_cpu));
+		cpu_list.emplace_back(QString::fromStdString((id >> 24 == 0x55 ? "RSX[0x55555555]" : cpu.get_name()) + ' '), std::move(func_cpu));
 
 		if (old_cpu_ptr == std::addressof(cpu))
 		{
@@ -1049,8 +1038,15 @@ void debugger_frame::UpdateUnitList()
 
 	if (emu_state != system_state::stopped)
 	{
-		idm::select<named_thread<ppu_thread>>(on_select, idm::unlocked);
-		idm::select<named_thread<spu_thread>>(on_select, idm::unlocked);
+		if (g_fxo->is_init<id_manager::id_map<named_thread<ppu_thread>>>())
+		{
+			idm::select<named_thread<ppu_thread>>(on_select, idm::unlocked);
+		}
+
+		if (g_fxo->is_init<id_manager::id_map<named_thread<spu_thread>>>())
+		{
+			idm::select<named_thread<spu_thread>>(on_select, idm::unlocked);
+		}
 
 		if (const auto render = g_fxo->try_get<rsx::thread>(); render && render->ctrl)
 		{
@@ -1153,7 +1149,7 @@ void debugger_frame::OnSelectUnit()
 		{
 		case 1:
 		{
-			m_cpu = idm::get<named_thread<ppu_thread>>(cpu_id);
+			m_cpu = idm::get_unlocked<named_thread<ppu_thread>>(cpu_id);
 
 			if (selected == m_cpu.get())
 			{
@@ -1164,7 +1160,7 @@ void debugger_frame::OnSelectUnit()
 		}
 		case 2:
 		{
-			m_cpu = idm::get<named_thread<spu_thread>>(cpu_id);
+			m_cpu = idm::get_unlocked<named_thread<spu_thread>>(cpu_id);
 
 			if (selected == m_cpu.get())
 			{
@@ -1179,7 +1175,7 @@ void debugger_frame::OnSelectUnit()
 
 			if (get_cpu())
 			{
-				m_disasm = make_disasm(m_rsx, nullptr);
+				m_disasm = make_disasm(m_rsx, null_ptr);
 			}
 
 			break;
@@ -1215,7 +1211,7 @@ void debugger_frame::OnSelectSPUDisassembler()
 	}
 
 	m_spu_disasm_dialog = new QDialog(this);
-	m_spu_disasm_dialog->setWindowTitle(tr("SPU Disassmebler Properties"));
+	m_spu_disasm_dialog->setWindowTitle(tr("SPU Disassembler Properties"));
 
 	// Panels
 	QVBoxLayout* vbox_panel(new QVBoxLayout());
@@ -1375,7 +1371,7 @@ void debugger_frame::WritePanels()
 	int loc = m_misc_state->verticalScrollBar()->value();
 	int hloc = m_misc_state->horizontalScrollBar()->value();
 	m_misc_state->clear();
-	m_misc_state->setPlainText(qstr(cpu->dump_misc()));
+	m_misc_state->setPlainText(QString::fromStdString(cpu->dump_misc()));
 	m_misc_state->verticalScrollBar()->setValue(loc);
 	m_misc_state->horizontalScrollBar()->setValue(hloc);
 
@@ -1384,7 +1380,7 @@ void debugger_frame::WritePanels()
 	m_regs->clear();
 	m_last_reg_state.clear();
 	cpu->dump_regs(m_last_reg_state, m_dump_reg_func_data);
-	m_regs->setPlainText(qstr(m_last_reg_state));
+	m_regs->setPlainText(QString::fromStdString(m_last_reg_state));
 	m_regs->verticalScrollBar()->setValue(loc);
 	m_regs->horizontalScrollBar()->setValue(hloc);
 
@@ -1412,15 +1408,14 @@ void debugger_frame::ShowGotoAddressDialog()
 	// Address expression input
 	QLineEdit* expression_input(new QLineEdit(m_goto_dialog));
 	expression_input->setFont(m_mono);
-	expression_input->setMaxLength(18);
 
 	if (const auto thread = get_cpu(); !thread || thread->get_class() != thread_class::spu)
 	{
-		expression_input->setValidator(new QRegularExpressionValidator(QRegularExpression("^(0[xX])?0*[a-fA-F0-9]{0,8}$"), this));
+		expression_input->setValidator(new HexValidator(expression_input));
 	}
 	else
 	{
-		expression_input->setValidator(new QRegularExpressionValidator(QRegularExpression("^(0[xX])?0*[a-fA-F0-9]{0,5}$"), this));
+		expression_input->setValidator(new HexValidator(expression_input));
 	}
 
 	// Ok/Cancel
@@ -1459,7 +1454,7 @@ void debugger_frame::ShowGotoAddressDialog()
 		// This also works if no thread is selected and has been selected before
 		if (result == QDialog::Accepted && cpu == get_cpu() && cpu == cpu_check())
 		{
-			PerformGoToRequest(expression_input->text());
+			PerformGoToRequest(normalize_hex_qstring(expression_input->text()));
 		}
 
 		m_goto_dialog = nullptr;
@@ -1613,7 +1608,7 @@ void debugger_frame::DoStep(bool step_over)
 
 				// Set breakpoint on next instruction
 				const u32 next_instruction_pc = current_instruction_pc + 4;
-				m_ppu_breakpoint_handler->AddBreakpoint(next_instruction_pc);
+				m_ppu_breakpoint_handler->AddBreakpoint(next_instruction_pc, breakpoint_types::bp_exec);
 
 				// Undefine previous step over breakpoint if it hasn't been already
 				// This can happen when the user steps over a branch that doesn't return to itself
@@ -1705,7 +1700,41 @@ void debugger_frame::EnableButtons(bool enable)
 
 	m_go_to_addr->setEnabled(enable);
 	m_go_to_pc->setEnabled(enable);
+	m_btn_add_bp->setEnabled(enable);
 	m_btn_step->setEnabled(step);
 	m_btn_step_over->setEnabled(step);
 	m_btn_run->setEnabled(enable);
+}
+
+void debugger_frame::OnRegsContextMenu(const QPoint& pos)
+{
+	QMenu* menu = m_regs->createStandardContextMenu();
+	QAction* memory_viewer_action = new QAction(tr("Show in Memory Viewer"), menu);
+
+	connect(memory_viewer_action, &QAction::triggered, this, &debugger_frame::RegsShowMemoryViewerAction);
+
+	menu->addSeparator();
+	menu->addAction(memory_viewer_action);
+	menu->exec(m_regs->mapToGlobal(pos));
+}
+
+void debugger_frame::RegsShowMemoryViewerAction()
+{
+	const QTextCursor cursor = m_regs->textCursor();
+	if (!cursor.hasSelection())
+	{
+		QMessageBox::warning(this, tr("No Selection"), tr("Please select a hex value first."));
+		return;
+	}
+
+	const QTextDocumentFragment frag(cursor);
+	const QString selected = frag.toPlainText().trimmed();
+	u64 pc = 0;
+	if (!parse_hex_qstring(selected, &pc))
+	{
+		QMessageBox::critical(this, tr("Invalid Hex"), tr("“%0” is not a valid 32-bit hex value.").arg(selected));
+		return;
+	}
+
+	memory_viewer_panel::ShowAtPC(static_cast<u32>(pc), make_check_cpu(get_cpu()));
 }

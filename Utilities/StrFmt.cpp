@@ -2,7 +2,6 @@
 #include "StrUtil.h"
 #include "cfmt.h"
 #include "util/endian.hpp"
-#include "util/logs.hpp"
 #include "util/v128.hpp"
 
 #include <locale>
@@ -566,9 +565,41 @@ void fmt_class_string<std::source_location>::format(std::string& out, u64 arg)
 		fmt::append(out, "\n(in file %s", loc.file_name());
 	}
 
-	if (auto func = loc.function_name(); func && func[0])
+	if (std::string_view full_func{loc.function_name() ? loc.function_name() : ""}; !full_func.empty())
 	{
-		fmt::append(out, ", in function %s)", func);
+		// Remove useless disambiguators
+		std::string func = fmt::replace_all(std::string(full_func), {
+			{"struct ", ""},
+			{"class ", ""},
+			{"enum ", ""},
+			{"typename ", ""},
+#ifdef _MSC_VER
+			{"__cdecl ", ""},
+#endif
+			{"unsigned long long", "ullong"},
+			//{"unsigned long", "ulong"}, // ullong
+			{"unsigned int", "uint"},
+			{"unsigned short", "ushort"},
+			{"unsigned char", "uchar"}});
+
+		// Remove function argument signature for long names
+		for (usz index = func.find_first_of('('); index != umax && func.size() >= 100u; index = func.find_first_of('(', index))
+		{
+			// Operator() function
+			if (func.compare(0, 3, "()("sv) == 0 || func.compare(0, 3, "() "sv))
+			{
+				if (usz not_space = func.find_first_not_of(' ', index + 2); not_space != umax && func[not_space] == '(')
+				{
+					index += 2;
+					continue;
+				}
+			}
+
+			func = func.substr(0, index) + "()";
+			break;
+		}
+
+		fmt::append(out, ", in function '%s')", func);
 	}
 	else
 	{
@@ -717,6 +748,12 @@ void fmt::raw_append(std::string& out, const char* fmt, const fmt_type_info* sup
 
 std::string fmt::replace_all(std::string_view src, std::string_view from, std::string_view to, usz count)
 {
+	if (src.empty())
+		return {};
+
+	if (from.empty() || count == 0)
+		return std::string(src);
+
 	std::string target;
 	target.reserve(src.size() + to.size());
 
@@ -793,7 +830,12 @@ std::string fmt::trim(const std::string& source, std::string_view values)
 	if (begin == source.npos)
 		return {};
 
-	return source.substr(begin, source.find_last_not_of(values) + 1);
+	const usz end = source.find_last_not_of(values);
+
+	if (end == source.npos)
+		return source.substr(begin);
+
+	return source.substr(begin, end + 1 - begin);
 }
 
 std::string fmt::trim_front(const std::string& source, std::string_view values)
@@ -831,45 +873,6 @@ std::string fmt::to_lower(std::string_view string)
 std::string fmt::truncate(std::string_view src, usz length)
 {
 	return std::string(src.begin(), src.begin() + std::min(src.size(), length));
-}
-
-bool fmt::match(const std::string& source, const std::string& mask)
-{
-	usz source_position = 0, mask_position = 0;
-
-	for (; source_position < source.size() && mask_position < mask.size(); ++mask_position, ++source_position)
-	{
-		switch (mask[mask_position])
-		{
-		case '?': break;
-
-		case '*':
-			for (usz test_source_position = source_position; test_source_position < source.size(); ++test_source_position)
-			{
-				if (match(source.substr(test_source_position), mask.substr(mask_position + 1)))
-				{
-					return true;
-				}
-			}
-			return false;
-
-		default:
-			if (source[source_position] != mask[mask_position])
-			{
-				return false;
-			}
-
-			break;
-		}
-	}
-
-	if (source_position != source.size())
-		return false;
-
-	if (mask_position != mask.size())
-		return false;
-
-	return true;
 }
 
 std::string get_file_extension(const std::string& file_path)

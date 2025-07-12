@@ -25,8 +25,8 @@ public:
 	void operator()();
 
 	PadInfo& GetInfo() { return m_info; }
-	auto& GetPads() { return m_pads; }
-	void SetRumble(const u32 pad, u8 large_motor, bool small_motor);
+	std::array<std::shared_ptr<Pad>, CELL_PAD_MAX_PORT_NUM>& GetPads() { return m_pads; }
+	void SetRumble(u32 pad, u8 large_motor, bool small_motor);
 	void SetIntercepted(bool intercepted);
 
 	s32 AddLddPad();
@@ -59,6 +59,7 @@ protected:
 	u32 num_ldd_pad = 0;
 
 private:
+	void apply_copilots();
 	void update_pad_states();
 
 	u32 m_mask_start_press_to_resume = 0;
@@ -70,7 +71,7 @@ private:
 
 namespace pad
 {
-	extern atomic_t<pad_thread*> g_current;
+	extern atomic_t<pad_thread*> g_pad_thread;
 	extern shared_mutex g_pad_mutex;
 	extern std::string g_title_id;
 	extern atomic_t<bool> g_enabled;
@@ -78,14 +79,14 @@ namespace pad
 	extern atomic_t<bool> g_started;
 	extern atomic_t<bool> g_home_menu_requested;
 
-	static inline class pad_thread* get_current_handler(bool relaxed = false)
+	static inline class pad_thread* get_pad_thread(bool relaxed = false)
 	{
 		if (relaxed)
 		{
-			return g_current.observe();
+			return g_pad_thread.observe();
 		}
 
-		return ensure(g_current.load());
+		return ensure(g_pad_thread.load());
 	}
 
 	static inline void set_enabled(bool enabled)
@@ -102,7 +103,7 @@ namespace pad
 	static inline void SetIntercepted(bool intercepted)
 	{
 		std::lock_guard lock(g_pad_mutex);
-		const auto handler = get_current_handler();
+		const auto handler = get_pad_thread();
 		handler->SetIntercepted(intercepted);
 	}
 }

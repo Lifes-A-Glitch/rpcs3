@@ -7,12 +7,9 @@
 #include "VKHelpers.h"
 #include "vkutils/barriers.h"
 #include "vkutils/buffer_object.h"
-#include "vkutils/data_heap.h"
 #include "vkutils/device.h"
 #include "vkutils/image.h"
 #include "vkutils/scratch.h"
-
-#include <span>
 
 namespace vk
 {
@@ -157,7 +154,7 @@ namespace vk
 			// If we have driver support for FBO loops, set the usage flag for it.
 			if (vk::get_current_renderer()->get_framebuffer_loops_support())
 			{
-				return { VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT, 0 };
+				return { VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT, VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT };
 			}
 
 			// Workarounds to force transition to GENERAL to decompress.
@@ -189,6 +186,9 @@ namespace vk
 			case driver_vendor::DOZEN:
 			case driver_vendor::LAVAPIPE:
 			case driver_vendor::V3DV:
+			case driver_vendor::HONEYKRISP:
+			case driver_vendor::PANVK:
+			case driver_vendor::ARM_MALI:
 				break;
 			}
 
@@ -683,4 +683,3 @@ namespace vk
 		void trim(vk::command_buffer& cmd, rsx::problem_severity memory_pressure);
 	};
 }
-//h

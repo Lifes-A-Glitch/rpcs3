@@ -5,10 +5,6 @@
 #include "Utilities/geometry.h"
 #include "gcm_enums.h"
 
-#include <memory>
-#include <bitset>
-#include <chrono>
-
 extern "C"
 {
 #include <libavutil/pixfmt.h>
@@ -18,9 +14,9 @@ extern "C"
 
 namespace rsx
 {
-	// Import address_range utilities
-	using utils::address_range;
-	using utils::address_range_vector;
+	// Import address_range32 utilities
+	using utils::address_range32;
+	using utils::address_range_vector32;
 	using utils::page_for;
 	using utils::page_start;
 	using utils::page_end;
@@ -124,7 +120,7 @@ namespace rsx
 		u8  bpp = 0;
 		u8  samples = 0;
 
-		address_range range{};
+		address_range32 range{};
 
 		gcm_framebuffer_info() = default;
 
@@ -135,16 +131,16 @@ namespace rsx
 			// Account for the last line of the block not reaching the end
 			const u32 block_size = pitch * (height - 1) * aa_factor_v;
 			const u32 line_size = width * aa_factor_u * bpp;
-			range = address_range::start_length(address, block_size + line_size);
+			range = address_range32::start_length(address, block_size + line_size);
 		}
 
-		address_range get_memory_range(const u32* aa_factors)
+		address_range32 get_memory_range(const u32* aa_factors)
 		{
 			calculate_memory_range(aa_factors[0], aa_factors[1]);
 			return range;
 		}
 
-		address_range get_memory_range() const
+		address_range32 get_memory_range() const
 		{
 			ensure(range.start == address);
 			return range;
@@ -217,9 +213,9 @@ namespace rsx
 	};
 
 	template <typename T>
-	void pad_texture(void* input_pixels, void* output_pixels, u16 input_width, u16 input_height, u16 output_width, u16 /*output_height*/)
+	void pad_texture(const void* input_pixels, void* output_pixels, u16 input_width, u16 input_height, u16 output_width, u16 /*output_height*/)
 	{
-		T *src = static_cast<T*>(input_pixels);
+		const T *src = static_cast<const T*>(input_pixels);
 		T *dst = static_cast<T*>(output_pixels);
 
 		for (u16 h = 0; h < input_height; ++h)
@@ -264,7 +260,7 @@ namespace rsx
 	static inline u32 get_location(u32 addr)
 	{
 		// We don't really care about the actual memory map, it shouldn't be possible to use the mmio bar region anyway
-		constexpr address_range local_mem_range = address_range::start_length(rsx::constants::local_mem_base, 0x1000'0000);
+		constexpr address_range32 local_mem_range = address_range32::start_length(rsx::constants::local_mem_base, 0x1000'0000);
 		return local_mem_range.overlaps(addr) ?
 			CELL_GCM_LOCATION_LOCAL :
 			CELL_GCM_LOCATION_MAIN;
@@ -340,8 +336,8 @@ namespace rsx
 	template <typename T, bool input_is_swizzled>
 	void convert_linear_swizzle(const void* input_pixels, void* output_pixels, u16 width, u16 height, u32 pitch)
 	{
-		u32 log2width = ceil_log2(width);
-		u32 log2height = ceil_log2(height);
+		const u32 log2width = ceil_log2(width);
+		const u32 log2height = ceil_log2(height);
 
 		// Max mask possible for square texture
 		u32 x_mask = 0x55555555;
@@ -360,7 +356,7 @@ namespace rsx
 		u32 offs_y = 0;
 		u32 offs_x = 0;
 		u32 offs_x0 = 0; //total y-carry offset for x
-		u32 y_incr = limit_mask;
+		const u32 y_incr = limit_mask;
 
 		// NOTE: The swizzled area is always a POT region and we must scan all of it to fill in the linear.
 		// It is assumed that there is no padding on the linear side for simplicity - backend upload/download will crop as needed.
@@ -504,10 +500,10 @@ namespace rsx
 		{
 			if (clip_x >= parent_width)
 			{
-				if (clip_width < parent_width)
-					width = clip_width;
-				else
+				if (clip_width >= parent_width)
 					width = parent_width;
+				//else
+				//	width = clip_width; // Already initialized with clip_width
 
 				x = static_cast<T>(0);
 			}
@@ -524,10 +520,10 @@ namespace rsx
 		{
 			if (clip_y >= parent_height)
 			{
-				if (clip_height < parent_height)
-					height = clip_height;
-				else
+				if (clip_height >= parent_height)
 					height = parent_height;
+				//else
+				//	height = clip_height; // Already initialized with clip_height
 
 				y = static_cast<T>(0);
 			}
@@ -590,8 +586,8 @@ namespace rsx
 	template <bool clamp = false>
 	static inline const std::pair<u16, u16> apply_resolution_scale(u16 width, u16 height, u16 ref_width = 0, u16 ref_height = 0)
 	{
-		ref_width = (ref_width)? ref_width : width;
-		ref_height = (ref_height)? ref_height : height;
+		ref_width = (ref_width) ? ref_width : width;
+		ref_height = (ref_height) ? ref_height : height;
 		const u16 ref = std::max(ref_width, ref_height);
 
 		if (ref > g_cfg.video.min_scalable_dimension)

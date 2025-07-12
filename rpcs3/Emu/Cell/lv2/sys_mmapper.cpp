@@ -36,12 +36,8 @@ lv2_memory::lv2_memory(u32 size, u32 align, u64 flags, u64 key, bool pshared, lv
 	, key(key)
 	, pshared(pshared)
 	, ct(ct)
-	, shm(std::make_shared<utils::shm>(size, 1 /* shareable flag */))
+	, shm(null_ptr)
 {
-#ifndef _WIN32
-	// Optimization that's useless on Windows :puke:
-	utils::memory_lock(shm->map_self(), size);
-#endif
 }
 
 lv2_memory::lv2_memory(utils::serial& ar)
@@ -51,23 +47,17 @@ lv2_memory::lv2_memory(utils::serial& ar)
 	, key(ar)
 	, pshared(ar)
 	, ct(lv2_memory_container::search(ar.pop<u32>()))
-	, shm([&](u32 addr)
+	, shm([&](u32 addr) -> shared_ptr<std::shared_ptr<utils::shm>>
 	{
 		if (addr)
 		{
-			return ensure(vm::get(vm::any, addr)->peek(addr).second);
+			return make_single_value(ensure(vm::get(vm::any, addr)->peek(addr).second));
 		}
 
-		const auto _shm = std::make_shared<utils::shm>(size, 1);
-		ar(std::span(_shm->map_self(), size));
-		return _shm;
+		return null_ptr;
 	}(ar.pop<u32>()))
 	, counter(ar)
 {
-#ifndef _WIN32
-	// Optimization that's useless on Windows :puke:
-	utils::memory_lock(shm->map_self(), size);
-#endif
 }
 
 CellError lv2_memory::on_id_create()
@@ -82,13 +72,13 @@ CellError lv2_memory::on_id_create()
 	return {};
 }
 
-std::shared_ptr<void> lv2_memory::load(utils::serial& ar)
+std::function<void(void*)> lv2_memory::load(utils::serial& ar)
 {
-	auto mem = std::make_shared<lv2_memory>(ar);
+	auto mem = make_shared<lv2_memory>(stx::exact_t<utils::serial&>(ar));
 	mem->exists++; // Disable on_id_create()
-	std::shared_ptr<void> ptr = lv2_obj::load(mem->key, mem, +mem->pshared);
+	auto func = load_func(mem, +mem->pshared);
 	mem->exists--;
-	return ptr;
+	return func;
 }
 
 void lv2_memory::save(utils::serial& ar)
@@ -96,13 +86,7 @@ void lv2_memory::save(utils::serial& ar)
 	USING_SERIALIZATION_VERSION(lv2_memory);
 
 	ar(size, align, flags, key, pshared, ct->id);
-	ar(counter ? vm::get_shm_addr(shm) : 0);
-
-	if (!counter)
-	{
-		ar(std::span(shm->map_self(), size));
-	}
-
+	ar(counter ? vm::get_shm_addr(*shm.load()) : 0);
 	ar(counter);
 }
 
@@ -128,7 +112,7 @@ error_code create_lv2_shm(bool pshared, u64 ipc_key, u64 size, u32 align, u64 fl
 
 	if (auto error = lv2_obj::create<lv2_memory>(_pshared, ipc_key, exclusive ? SYS_SYNC_NEWLY_CREATED : SYS_SYNC_NOT_CARE, [&]()
 	{
-		return std::make_shared<lv2_memory>(
+		return make_shared<lv2_memory>(
 			static_cast<u32>(size),
 			align,
 			flags,
@@ -294,7 +278,7 @@ error_code sys_mmapper_allocate_shared_memory_from_container(ppu_thread& ppu, u6
 	}
 	}
 
-	const auto ct = idm::get<lv2_memory_container>(cid);
+	const auto ct = idm::get_unlocked<lv2_memory_container>(cid);
 
 	if (!ct)
 	{
@@ -491,7 +475,7 @@ error_code sys_mmapper_allocate_shared_memory_from_container_ext(ppu_thread& ppu
 		}
 	}
 
-	const auto ct = idm::get<lv2_memory_container>(cid);
+	const auto ct = idm::get_unlocked<lv2_memory_container>(cid);
 
 	if (!ct)
 	{
@@ -645,6 +629,22 @@ error_code sys_mmapper_map_shared_memory(ppu_thread& ppu, u32 addr, u32 mem_id, 
 			return CELL_EALIGN;
 		}
 
+		for (stx::shared_ptr<std::shared_ptr<utils::shm>> to_insert, null; !mem.shm;)
+		{
+			// Insert atomically the memory handle (laziliy allocated)
+			if (!to_insert)
+			{
+				to_insert = make_single_value(std::make_shared<utils::shm>(mem.size, 1 /* shareable flag */));
+			}
+
+			null.reset();
+
+			if (mem.shm.compare_exchange(null, to_insert))
+			{
+				break;
+			}
+		}
+
 		mem.counter++;
 		return {};
 	});
@@ -659,7 +659,9 @@ error_code sys_mmapper_map_shared_memory(ppu_thread& ppu, u32 addr, u32 mem_id, 
 		return mem.ret;
 	}
 
-	if (!area->falloc(addr, mem->size, &mem->shm, mem->align == 0x10000 ? SYS_MEMORY_PAGE_SIZE_64K : SYS_MEMORY_PAGE_SIZE_1M))
+	auto shm_ptr = *mem->shm.load();
+
+	if (!area->falloc(addr, mem->size, &shm_ptr, mem->align == 0x10000 ? SYS_MEMORY_PAGE_SIZE_64K : SYS_MEMORY_PAGE_SIZE_1M))
 	{
 		mem->counter--;
 
@@ -697,6 +699,22 @@ error_code sys_mmapper_search_and_map(ppu_thread& ppu, u32 start_addr, u32 mem_i
 			return CELL_EALIGN;
 		}
 
+		for (stx::shared_ptr<std::shared_ptr<utils::shm>> to_insert, null; !mem.shm;)
+		{
+			// Insert atomically the memory handle (laziliy allocated)
+			if (!to_insert)
+			{
+				to_insert = make_single_value(std::make_shared<utils::shm>(mem.size, 1 /* shareable flag */));
+			}
+
+			null.reset();
+
+			if (mem.shm.compare_exchange(null, to_insert))
+			{
+				break;
+			}
+		}
+
 		mem.counter++;
 		return {};
 	});
@@ -711,7 +729,9 @@ error_code sys_mmapper_search_and_map(ppu_thread& ppu, u32 start_addr, u32 mem_i
 		return mem.ret;
 	}
 
-	const u32 addr = area->alloc(mem->size, &mem->shm, mem->align, mem->align == 0x10000 ? SYS_MEMORY_PAGE_SIZE_64K : SYS_MEMORY_PAGE_SIZE_1M);
+	auto shm_ptr = *mem->shm.load();
+
+	const u32 addr = area->alloc(mem->size, &shm_ptr, mem->align, mem->align == 0x10000 ? SYS_MEMORY_PAGE_SIZE_64K : SYS_MEMORY_PAGE_SIZE_1M);
 
 	if (!addr)
 	{
@@ -755,7 +775,7 @@ error_code sys_mmapper_unmap_shared_memory(ppu_thread& ppu, u32 addr, vm::ptr<u3
 
 	const auto mem = idm::select<lv2_obj, lv2_memory>([&](u32 id, lv2_memory& mem) -> u32
 	{
-		if (mem.shm.get() == shm.second.get())
+		if (auto shm0 = mem.shm.load(); shm0 && shm0->get() == shm.second.get())
 		{
 			return id;
 		}
@@ -797,7 +817,7 @@ error_code sys_mmapper_enable_page_fault_notification(ppu_thread& ppu, u32 start
 
 	// TODO: Check memory region's flags to make sure the memory can be used for page faults.
 
-	auto queue = idm::get<lv2_obj, lv2_event_queue>(event_queue_id);
+	auto queue = idm::get_unlocked<lv2_obj, lv2_event_queue>(event_queue_id);
 
 	if (!queue)
 	{ // Can't connect the queue if it doesn't exist.

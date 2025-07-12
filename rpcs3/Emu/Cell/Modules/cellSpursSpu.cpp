@@ -4,9 +4,6 @@
 #include "Emu/Memory/vm_reservation.h"
 #include "Emu/Cell/SPUThread.h"
 #include "Emu/Cell/SPURecompiler.h"
-#include "Emu/Cell/lv2/sys_lwmutex.h"
-#include "Emu/Cell/lv2/sys_lwcond.h"
-#include "Emu/Cell/lv2/sys_spu.h"
 #include "cellSpurs.h"
 
 #include "util/asm.hpp"
@@ -18,7 +15,6 @@ LOG_CHANNEL(cellSpurs);
 // Temporarily
 #ifndef _MSC_VER
 #pragma GCC diagnostic ignored "-Wunused-function"
-#pragma GCC diagnostic ignored "-Wunused-parameter"
 #endif
 
 //----------------------------------------------------------------------------
@@ -92,7 +88,7 @@ void spursJobchainPopUrgentCommand(spu_thread& spu);
 //----------------------------------------------------------------------------
 
 // Output trace information
-void cellSpursModulePutTrace(CellSpursTracePacket* packet, u32 dmaTagId)
+void cellSpursModulePutTrace(CellSpursTracePacket* /*packet*/, u32 /*dmaTagId*/)
 {
 	// TODO: Implement this
 }
@@ -622,7 +618,7 @@ bool spursKernel2SelectWorkload(spu_thread& spu)
 void spursKernelDispatchWorkload(spu_thread& spu, u64 widAndPollStatus)
 {
 	const auto ctxt = spu._ptr<SpursKernelContext>(0x100);
-	auto isKernel2 = ctxt->spurs->flags1 & SF1_32_WORKLOADS ? true : false;
+	const bool isKernel2 = ctxt->spurs->flags1 & SF1_32_WORKLOADS ? true : false;
 
 	auto pollStatus = static_cast<u32>(widAndPollStatus);
 	auto wid = static_cast<u32>(widAndPollStatus >> 32);
@@ -674,7 +670,7 @@ void spursKernelDispatchWorkload(spu_thread& spu, u64 widAndPollStatus)
 bool spursKernelWorkloadExit(spu_thread& spu)
 {
 	const auto ctxt = spu._ptr<SpursKernelContext>(0x100);
-	auto isKernel2 = ctxt->spurs->flags1 & SF1_32_WORKLOADS ? true : false;
+	const bool isKernel2 = ctxt->spurs->flags1 & SF1_32_WORKLOADS ? true : false;
 
 	// Select next workload to run
 	spu.gpr[3].clear();
@@ -701,7 +697,7 @@ bool spursKernelEntry(spu_thread& spu)
 	ctxt->spuNum = spu.gpr[3]._u32[3];
 	ctxt->spurs.set(spu.gpr[4]._u64[1]);
 
-	auto isKernel2 = ctxt->spurs->flags1 & SF1_32_WORKLOADS ? true : false;
+	const bool isKernel2 = ctxt->spurs->flags1 & SF1_32_WORKLOADS ? true : false;
 
 	// Initialise the SPURS context to its initial values
 	ctxt->dmaTagId = CELL_SPURS_KERNEL_DMA_TAG_ID;
@@ -785,8 +781,8 @@ void spursSysServiceIdleHandler(spu_thread& spu, SpursKernelContext* ctxt)
 			}
 		}
 
-		bool allSpusIdle = nIdlingSpus == spurs->nSpus ? true : false;
-		bool exitIfNoWork = spurs->flags1 & SF1_EXIT_IF_NO_WORK ? true : false;
+		const bool allSpusIdle = nIdlingSpus == spurs->nSpus;
+		const bool exitIfNoWork = spurs->flags1 & SF1_EXIT_IF_NO_WORK ? true : false;
 		shouldExit = allSpusIdle && exitIfNoWork;
 
 		// Check if any workloads can be scheduled
@@ -843,7 +839,7 @@ void spursSysServiceIdleHandler(spu_thread& spu, SpursKernelContext* ctxt)
 			}
 		}
 
-		bool spuIdling = spurs->spuIdling & (1 << ctxt->spuNum) ? true : false;
+		const bool spuIdling = spurs->spuIdling & (1 << ctxt->spuNum) ? true : false;
 		if (foundReadyWorkload && shouldExit == false)
 		{
 			spurs->spuIdling &= ~(1 << ctxt->spuNum);
@@ -874,7 +870,7 @@ void spursSysServiceIdleHandler(spu_thread& spu, SpursKernelContext* ctxt)
 }
 
 // Main function for the system service
-void spursSysServiceMain(spu_thread& spu, u32 pollStatus)
+void spursSysServiceMain(spu_thread& spu, u32 /*pollStatus*/)
 {
 	const auto ctxt = spu._ptr<SpursKernelContext>(0x100);
 
@@ -1169,7 +1165,7 @@ void spursSysServiceUpdateShutdownCompletionEvents(spu_thread& spu, SpursKernelC
 }
 
 // Update the trace count for this SPU
-void spursSysServiceTraceSaveCount(spu_thread& spu, SpursKernelContext* ctxt)
+void spursSysServiceTraceSaveCount(spu_thread& /*spu*/, SpursKernelContext* ctxt)
 {
 	if (ctxt->traceBuffer)
 	{
@@ -1597,12 +1593,12 @@ s32 spursTasksetProcessRequest(spu_thread& spu, s32 request, u32* taskId, u32* i
 			spursHalt(spu);
 		}
 
-		vm::_ref<v128>(ctxt->taskset.addr() + ::offset32(&CellSpursTaskset::waiting)) = waiting;
-		vm::_ref<v128>(ctxt->taskset.addr() + ::offset32(&CellSpursTaskset::running)) = running;
-		vm::_ref<v128>(ctxt->taskset.addr() + ::offset32(&CellSpursTaskset::ready)) = ready;
-		vm::_ref<v128>(ctxt->taskset.addr() + ::offset32(&CellSpursTaskset::pending_ready)) = v128{};
-		vm::_ref<v128>(ctxt->taskset.addr() + ::offset32(&CellSpursTaskset::enabled)) = enabled;
-		vm::_ref<v128>(ctxt->taskset.addr() + ::offset32(&CellSpursTaskset::signalled)) = signalled;
+		// vm::_ref<v128>(ctxt->taskset.addr() + ::offset32(&CellSpursTaskset::waiting)) = waiting;
+		// vm::_ref<v128>(ctxt->taskset.addr() + ::offset32(&CellSpursTaskset::running)) = running;
+		// vm::_ref<v128>(ctxt->taskset.addr() + ::offset32(&CellSpursTaskset::ready)) = ready;
+		// vm::_ref<v128>(ctxt->taskset.addr() + ::offset32(&CellSpursTaskset::pending_ready)) = v128{};
+		// vm::_ref<v128>(ctxt->taskset.addr() + ::offset32(&CellSpursTaskset::enabled)) = enabled;
+		// vm::_ref<v128>(ctxt->taskset.addr() + ::offset32(&CellSpursTaskset::signalled)) = signalled;
 
 		std::memcpy(spu._ptr<void>(0x2700), spu._ptr<void>(0x100), 128); // Copy data
 	}//);
@@ -2059,7 +2055,7 @@ s32 spursTasksetLoadElf(spu_thread& spu, u32* entryPoint, u32* lowestLoadAddr, u
 //----------------------------------------------------------------------------
 // SPURS taskset policy module functions
 //----------------------------------------------------------------------------
-bool spursJobChainEntry(spu_thread& spu)
+bool spursJobChainEntry(spu_thread& /*spu*/)
 {
 	//const auto ctxt = spu._ptr<SpursJobChainContext>(0x4a00);
 	//auto kernelCtxt = spu._ptr<SpursKernelContext>(spu.gpr[3]._u32[3]);

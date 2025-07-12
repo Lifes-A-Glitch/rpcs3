@@ -204,7 +204,7 @@ namespace rsx
 
 			static void decode_one(context* ctx, u32 reg, u32 arg);
 
-			static void batch_decode(context* ctx, u32 reg, const std::span<const u32>& args);
+			static void batch_decode(context* ctx, u32 reg, const std::span<const u32>& args, const std::function<bool(context*, u32, u32)>& notify = {});
 		};
 
 		struct set_transform_program
@@ -221,12 +221,12 @@ namespace rsx
 			}
 		};
 
-		template<u32 index>
-		struct set_texture_dirty_bit
+		template <u32 index>
+		struct set_fragment_texture_dirty_bit
 		{
-			static void impl(context* ctx, u32 /*reg*/, u32 /*arg*/)
+			static void impl(context* ctx, u32 /*reg*/, u32 arg)
 			{
-				util::set_fragment_texture_dirty_bit(ctx, index);
+				util::set_fragment_texture_dirty_bit(ctx, arg, index);
 			}
 		};
 

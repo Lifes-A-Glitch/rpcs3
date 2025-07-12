@@ -92,6 +92,15 @@ namespace gui
 		// Returns the style for richtext <a> links. e.g. style="color: #123456;"
 		QString get_link_style(const QString& name = "richtext_link_color");
 
+		// Returns a richtext link
+		QString make_link(const QString& text, const QString& url);
+
+		// Returns a bold richtext string
+		QString make_bold(const QString& text);
+
+		// Returns a richtext paragraph with white-space: nowrap;
+		QString make_paragraph(QString text, const QString& white_space_style = "nowrap");
+
 		template <typename T>
 		void set_font_size(T& qobj, int size)
 		{
@@ -150,11 +159,13 @@ namespace gui
 
 		static inline Qt::ColorScheme color_scheme()
 		{
+			// use the QGuiApplication's properties to report the default GUI color scheme
 			return QGuiApplication::styleHints()->colorScheme();
 		}
 
 		static inline bool dark_mode_active()
 		{
+			// "true" if the default GUI color scheme is dark. "false" otherwise
 			return color_scheme() == Qt::ColorScheme::Dark;
 		}
 

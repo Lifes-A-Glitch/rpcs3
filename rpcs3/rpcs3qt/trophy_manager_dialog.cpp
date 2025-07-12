@@ -4,6 +4,7 @@
 #include "game_list_delegate.h"
 #include "qt_utils.h"
 #include "game_list.h"
+#include "gui_application.h"
 #include "gui_settings.h"
 #include "progress_dialog.h"
 #include "persistent_settings.h"
@@ -420,7 +421,7 @@ bool trophy_manager_dialog::LoadTrophyFolderToDB(const std::string& trop_name)
 	std::unique_ptr<GameTrophiesData> game_trophy_data = std::make_unique<GameTrophiesData>();
 
 	game_trophy_data->path = vfs_path;
-	game_trophy_data->trop_usr.reset(new TROPUSRLoader());
+	game_trophy_data->trop_usr = std::make_unique<TROPUSRLoader>();
 	const std::string tropusr_path = trophy_path + "/TROPUSR.DAT";
 	const std::string tropconf_path = trophy_path + "/TROPCONF.SFM";
 	const bool success = game_trophy_data->trop_usr->Load(tropusr_path, tropconf_path).success;
@@ -511,7 +512,6 @@ void trophy_manager_dialog::RepaintUI(bool restore_layout)
 	if (restore_layout && !m_game_table->horizontalHeader()->restoreState(game_table_state) && m_game_table->rowCount())
 	{
 		// If no settings exist, resize to contents. (disabled)
-		//m_game_table->verticalHeader()->resizeSections(QHeaderView::ResizeMode::ResizeToContents);
 		//m_game_table->horizontalHeader()->resizeSections(QHeaderView::ResizeMode::ResizeToContents);
 	}
 
@@ -519,7 +519,6 @@ void trophy_manager_dialog::RepaintUI(bool restore_layout)
 	if (restore_layout && !m_trophy_table->horizontalHeader()->restoreState(trophy_table_state) && m_trophy_table->rowCount())
 	{
 		// If no settings exist, resize to contents. (disabled)
-		//m_trophy_table->verticalHeader()->resizeSections(QHeaderView::ResizeMode::ResizeToContents);
 		//m_trophy_table->horizontalHeader()->resizeSections(QHeaderView::ResizeMode::ResizeToContents);
 	}
 
@@ -579,15 +578,18 @@ void trophy_manager_dialog::ResizeGameIcons()
 
 	ReadjustGameTable();
 
+	const s32 language_index = gui_application::get_language_id();
+	const QString localized_icon = QString::fromStdString(fmt::format("ICON0_%02d.PNG", language_index));
+
 	for (int i = 0; i < m_game_table->rowCount(); ++i)
 	{
 		if (movie_item* item = static_cast<movie_item*>(m_game_table->item(i, static_cast<int>(gui::trophy_game_list_columns::icon))))
 		{
 			const qreal dpr = devicePixelRatioF();
 			const int trophy_index = item->data(GameUserRole::GameIndex).toInt();
-			const std::string icon_path = m_trophies_db[trophy_index]->path + "ICON0.PNG";
+			const QString icon_path = QString::fromStdString(m_trophies_db[trophy_index]->path);
 
-			item->set_icon_load_func([this, icon_path, trophy_index, cancel = item->icon_loading_aborted(), dpr](int index)
+			item->set_icon_load_func([this, icon_path, localized_icon, trophy_index, cancel = item->icon_loading_aborted(), dpr](int index)
 			{
 				if (cancel && cancel->load())
 				{
@@ -601,8 +603,8 @@ void trophy_manager_dialog::ResizeGameIcons()
 					if (!item->data(GameUserRole::GamePixmapLoaded).toBool())
 					{
 						// Load game icon
-						const std::string icon_path = m_trophies_db[trophy_index]->path + "ICON0.PNG";
-						if (!icon.load(QString::fromStdString(icon_path)))
+						if (!icon.load(icon_path + localized_icon) &&
+							!icon.load(icon_path + "ICON0.PNG"))
 						{
 							gui_log.warning("Could not load trophy game icon from path %s", icon_path);
 						}
@@ -1110,11 +1112,13 @@ void trophy_manager_dialog::PopulateTrophyTable()
 		return;
 
 	auto& data = m_trophies_db[m_game_combo->currentData().toInt()];
+	ensure(!!data);
+
 	gui_log.trace("Populating Trophy Manager UI with %s %s", data->game_name, data->path);
 
 	const int all_trophies = data->trop_usr->GetTrophiesCount();
 	const int unlocked_trophies = data->trop_usr->GetUnlockedTrophiesCount();
-	const int percentage = 100 * unlocked_trophies / all_trophies;
+	const int percentage = (all_trophies > 0) ? (100 * unlocked_trophies / all_trophies) : 0;
 
 	m_game_progress->setText(tr("Progress: %1% (%2/%3)").arg(percentage).arg(unlocked_trophies).arg(all_trophies));
 
@@ -1172,11 +1176,12 @@ void trophy_manager_dialog::PopulateTrophyTable()
 		// Get name and detail
 		for (std::shared_ptr<rXmlNode> n2 = n->GetChildren(); n2; n2 = n2->GetNext())
 		{
-			if (n2->GetName() == "name")
+			const std::string name = n2->GetName();
+			if (name == "name")
 			{
 				strcpy_trunc(details.name, n2->GetNodeContent());
 			}
-			if (n2->GetName() == "detail")
+			else if (name == "detail")
 			{
 				strcpy_trunc(details.description, n2->GetNodeContent());
 			}
@@ -1215,9 +1220,9 @@ void trophy_manager_dialog::PopulateTrophyTable()
 void trophy_manager_dialog::ReadjustGameTable() const
 {
 	// Fixate vertical header and row height
+	m_game_table->verticalHeader()->setDefaultSectionSize(m_game_icon_size.height());
 	m_game_table->verticalHeader()->setMinimumSectionSize(m_game_icon_size.height());
 	m_game_table->verticalHeader()->setMaximumSectionSize(m_game_icon_size.height());
-	m_game_table->resizeRowsToContents();
 
 	// Resize and fixate icon column
 	m_game_table->resizeColumnToContents(static_cast<int>(gui::trophy_game_list_columns::icon));
@@ -1230,9 +1235,9 @@ void trophy_manager_dialog::ReadjustGameTable() const
 void trophy_manager_dialog::ReadjustTrophyTable() const
 {
 	// Fixate vertical header and row height
+	m_trophy_table->verticalHeader()->setDefaultSectionSize(m_icon_height);
 	m_trophy_table->verticalHeader()->setMinimumSectionSize(m_icon_height);
 	m_trophy_table->verticalHeader()->setMaximumSectionSize(m_icon_height);
-	m_trophy_table->resizeRowsToContents();
 
 	// Resize and fixate icon column
 	m_trophy_table->resizeColumnToContents(static_cast<int>(gui::trophy_list_columns::icon));
